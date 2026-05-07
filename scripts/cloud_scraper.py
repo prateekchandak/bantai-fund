@@ -173,27 +173,43 @@ def scrape():
         f"{BASE_URL}/my11c/api/fl/auth/tokenize/v1/external/verifyEmailOtp",
         json=payload
     )
-    print(f"[LOGIN] verify status: {resp.status_code} - {resp.text[:400]}")
+    print(f"[LOGIN] verify status: {resp.status_code} - {resp.text[:1000]}")
     try:
         verify_data = resp.json()
     except Exception:
         verify_data = {}
 
-    # Extract auth from response data if cookies weren't set
-    if not session.cookies.get("my11c-authToken"):
-        try:
-            auth_data = resp.json().get("data", {})
-            if isinstance(auth_data, dict):
-                uid = auth_data.get("uid") or auth_data.get("userId")
-                token = auth_data.get("authToken") or auth_data.get("token") or auth_data.get("AccessToken")
-                if uid:
-                    session.cookies.set("my11c-uid", str(uid), domain="fantasy.iplt20.com")
-                if token:
-                    session.cookies.set("my11c-authToken", str(token), domain="fantasy.iplt20.com")
-                print(f"[LOGIN] Manual auth: uid={'found' if uid else 'missing'}, token={'found' if token else 'missing'}")
-        except:
-            pass
+    # Pull uid + token from the verify response (the /classic/ API needs
+    # cookies that the /my11c/ verify call does NOT set on /classic/ paths).
+    auth_data = verify_data.get("data", {}) if isinstance(verify_data, dict) else {}
+    uid = None
+    token = None
+    if isinstance(auth_data, dict):
+        uid = auth_data.get("uid") or auth_data.get("userId") or auth_data.get("UserId")
+        token = (auth_data.get("authToken") or auth_data.get("token")
+                 or auth_data.get("AccessToken") or auth_data.get("idToken")
+                 or auth_data.get("IdToken"))
 
+    # Fallback: read uid/token out of cookies if response body didn't carry them.
+    if not uid:
+        c = session.cookies.get("my11c-uid")
+        if c:
+            uid = c
+    if not token:
+        c = session.cookies.get("my11c-authToken")
+        if c:
+            token = c
+
+    # Set cookies under both /my11c/ and /classic/ aliases — the legacy classic
+    # API checks `userId` / `Token` (no prefix), while the new my11c uses prefixed.
+    if uid:
+        for name in ("my11c-uid", "userId", "uid"):
+            session.cookies.set(name, str(uid), domain="fantasy.iplt20.com", path="/")
+    if token:
+        for name in ("my11c-authToken", "Token", "authToken", "auth-token"):
+            session.cookies.set(name, str(token), domain="fantasy.iplt20.com", path="/")
+
+    print(f"[LOGIN] uid={'set' if uid else 'MISSING'}, token={'set' if token else 'MISSING'}")
     print(f"[LOGIN] Final cookies: {[c.name for c in session.cookies]}")
 
     # Step 4: Get gameday from mixapi, next match from tour-fixtures
