@@ -179,43 +179,35 @@ def scrape():
     except Exception:
         verify_data = {}
 
-    # Pull uid + token from the verify response (the /classic/ API needs
-    # cookies that the /my11c/ verify call does NOT set on /classic/ paths).
-    auth_data = verify_data.get("data", {}) if isinstance(verify_data, dict) else {}
-    uid = None
-    token = None
-    if isinstance(auth_data, dict):
-        uid = auth_data.get("uid") or auth_data.get("userId") or auth_data.get("UserId")
-        token = (auth_data.get("authToken") or auth_data.get("token")
-                 or auth_data.get("AccessToken") or auth_data.get("idToken")
-                 or auth_data.get("IdToken"))
+    # Read what Set-Cookie gave us. The verify response body is just
+    # {"success":true} — auth flows entirely through cookies.
+    print(f"[LOGIN] Cookies after verify:")
+    for c in session.cookies:
+        v = c.value or ""
+        print(f"   {c.name}: domain={c.domain}, path={c.path}, value={v[:25]}...")
 
-    # Fallback: read uid/token out of cookies if response body didn't carry them.
-    if not uid:
-        c = session.cookies.get("my11c-uid")
-        if c:
-            uid = c
-    if not token:
-        c = session.cookies.get("my11c-authToken")
-        if c:
-            token = c
-
-    # Set cookies under both /my11c/ and /classic/ aliases — the legacy classic
-    # API checks `userId` / `Token` (no prefix), while the new my11c uses prefixed.
-    if uid:
-        for name in ("my11c-uid", "userId", "uid"):
-            session.cookies.set(name, str(uid), domain="fantasy.iplt20.com", path="/")
-    if token:
-        for name in ("my11c-authToken", "Token", "authToken", "auth-token"):
-            session.cookies.set(name, str(token), domain="fantasy.iplt20.com", path="/")
-
-    print(f"[LOGIN] uid={'set' if uid else 'MISSING'}, token={'set' if token else 'MISSING'}")
-    print(f"[LOGIN] Final cookies: {[c.name for c in session.cookies]}")
+    # Mirror the my11c-* cookies onto path=/ so /classic/api requests pick them up.
+    # (Set-Cookie from /my11c/verifyEmailOtp scopes them to path=/my11c by default.)
+    uid_cookie = session.cookies.get("my11c-uid")
+    tok_cookie = session.cookies.get("my11c-authToken")
+    if uid_cookie:
+        session.cookies.set("my11c-uid", uid_cookie, domain="fantasy.iplt20.com", path="/")
+    if tok_cookie:
+        session.cookies.set("my11c-authToken", tok_cookie, domain="fantasy.iplt20.com", path="/")
+    print(f"[LOGIN] uid={'set' if uid_cookie else 'MISSING'}, "
+          f"token={'set' if tok_cookie else 'MISSING'}")
 
     # Step 4: Get gameday from mixapi, next match from tour-fixtures
     print("[SCRAPE] Getting gameday info...")
     resp = session.get(f"{BASE_URL}/classic/api/live/mixapi?lang=en")
-    mix = resp.json()
+    print(f"[SCRAPE] mixapi: status={resp.status_code}, "
+          f"ct={resp.headers.get('Content-Type','?')}, "
+          f"len={len(resp.text)}, body[:300]={resp.text[:300]!r}")
+    try:
+        mix = resp.json()
+    except Exception as e:
+        print(f"[SCRAPE] mixapi JSON parse failed: {e}")
+        mix = {}
     gd = 0
     if mix.get("Data", {}).get("Value"):
         gd = mix["Data"]["Value"].get("GamedayId", 0)
@@ -270,7 +262,12 @@ def scrape():
         f"&pageChunk=500&pageOneChunk=500&minCount=8&leagueId={LEAGUE_ID}"
     )
     resp = session.get(lb_url)
-    lb = resp.json()
+    print(f"[SCRAPE] leaderboard: status={resp.status_code}, len={len(resp.text)}")
+    try:
+        lb = resp.json()
+    except Exception as e:
+        print(f"[SCRAPE] leaderboard JSON parse failed: {e}, body[:500]={resp.text[:500]!r}")
+        raise RuntimeError("Leaderboard returned non-JSON")
     print(f"[SCRAPE] Leaderboard response: success={lb.get('Meta', {}).get('Success')}, msg={lb.get('Meta', {}).get('Message', '')}")
 
     if not lb.get("Meta", {}).get("Success"):
