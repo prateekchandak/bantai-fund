@@ -27,11 +27,34 @@ HEADERS = {
 
 
 # ── Gmail OTP reader (via IMAP) ──────────────────────────────────────
-def get_otp_from_gmail(max_wait=120):
-    """Read the latest UNSEEN OTP from Gmail using IMAP + App Password.
-    Old OTP emails should be marked as read before calling this."""
+OTP_SENDER = "no_reply@my11circle.com"
+
+def _extract_otp_from_body(body):
+    """Extract OTP from email body. My11Circle OTPs are 8 digits."""
+    clean = re.sub(r'<[^>]+>', ' ', body)
+    # Body format: "Dear User, 87156250 is your OTP to register/login..."
+    # Try the contextual pattern first to avoid false positives like the "2026" year.
+    m = re.search(r'(\d{6,10})\s+is your OTP', clean, re.IGNORECASE)
+    if m:
+        return m.group(1)
+    # Fallback: longest digit run of 6-10 digits (excludes the 4-digit year).
+    candidates = re.findall(r'\b\d{6,10}\b', clean)
+    if candidates:
+        # Prefer 8-digit (standard My11Circle OTP)
+        eights = [c for c in candidates if len(c) == 8]
+        return eights[0] if eights else max(candidates, key=len)
+    return None
+
+
+def get_otp_from_gmail(after_ts, max_wait=180):
+    """Wait for an OTP email from My11Circle that arrived AFTER `after_ts` (epoch).
+
+    Filtering by sender + arrival time is more reliable than the UNSEEN flag,
+    which has caching/lag issues against Gmail IMAP.
+    """
     import imaplib
     import email as emaillib
+    from email.utils import parsedate_to_datetime
 
     imap_user = os.environ.get("IPL_EMAIL", EMAIL)
     imap_pass = os.environ["GMAIL_APP_PASSWORD"]
@@ -43,48 +66,47 @@ def get_otp_from_gmail(max_wait=120):
             mail.login(imap_user, imap_pass)
             mail.select("inbox")
 
-            # Search for any unread email with OTP/verification/code in subject
-            _, msg_ids = mail.search(None, '(UNSEEN SUBJECT "OTP")')
-            if not msg_ids[0]:
-                _, msg_ids = mail.search(None, '(UNSEEN SUBJECT "verification")')
-            if not msg_ids[0]:
-                _, msg_ids = mail.search(None, '(UNSEEN SUBJECT "code")')
-
+            # Filter by sender — much more specific than subject.
+            _, msg_ids = mail.search(None, f'(FROM "{OTP_SENDER}")')
             ids = msg_ids[0].split()
-            if ids:
-                _, msg_data = mail.fetch(ids[-1], "(RFC822)")
+            # Walk newest → oldest, take the first one newer than after_ts.
+            for mid in reversed(ids[-10:]):  # last 10 is plenty
+                _, msg_data = mail.fetch(mid, "(RFC822)")
                 raw = msg_data[0][1]
                 msg = emaillib.message_from_bytes(raw)
+                try:
+                    msg_ts = parsedate_to_datetime(msg.get("Date")).timestamp()
+                except Exception:
+                    msg_ts = 0
+                if msg_ts < after_ts - 5:  # 5s clock skew tolerance
+                    continue  # too old
 
                 body = ""
                 if msg.is_multipart():
                     for part in msg.walk():
-                        ct = part.get_content_type()
-                        if ct in ("text/plain", "text/html"):
+                        if part.get_content_type() == "text/plain":
                             try:
                                 body = part.get_payload(decode=True).decode("utf-8", errors="ignore")
                                 if body:
                                     break
-                            except:
+                            except Exception:
                                 pass
+                    if not body:
+                        for part in msg.walk():
+                            if part.get_content_type() == "text/html":
+                                try:
+                                    body = part.get_payload(decode=True).decode("utf-8", errors="ignore")
+                                    if body:
+                                        break
+                                except Exception:
+                                    pass
                 else:
                     body = msg.get_payload(decode=True).decode("utf-8", errors="ignore")
 
-                # Strip HTML tags so regex doesn't match attribute values
-                clean_body = re.sub(r'<[^>]+>', ' ', body)
-                # Prefer 6-digit OTPs (standard for IPL Fantasy/My11Circle).
-                # Loose \d{4,6} matches "2026" (the year) in the email footer.
-                otp_match = re.search(r'\b(\d{6})\b', clean_body)
-                if not otp_match:
-                    # Fallback: 4-5 digit with explicit OTP/code context
-                    otp_match = re.search(
-                        r'(?:verification\s+code|OTP|code)[^0-9]{0,20}(\d{4,5})\b',
-                        clean_body, re.IGNORECASE
-                    )
-                if otp_match:
-                    otp = otp_match.group(1)
-                    print(f"[GMAIL] Found OTP: {'*' * (len(otp)-2)}{otp[-2:]} (len={len(otp)})")
-                    mail.store(ids[-1], '+FLAGS', '\\Seen')
+                otp = _extract_otp_from_body(body)
+                if otp:
+                    age = int(time.time() - msg_ts)
+                    print(f"[GMAIL] Found OTP: ***{otp[-2:]} (len={len(otp)}, email age={age}s)")
                     mail.logout()
                     return otp
 
@@ -103,29 +125,11 @@ def scrape():
     session = requests.Session()
     session.headers.update(HEADERS)
 
-    # Step 0: Mark ALL recent unread emails as read to avoid stale OTPs
-    print("[LOGIN] Clearing old OTP/verification emails...")
-    import imaplib
-    try:
-        mail = imaplib.IMAP4_SSL("imap.gmail.com")
-        mail.login(os.environ.get("IPL_EMAIL", EMAIL), os.environ["GMAIL_APP_PASSWORD"])
-        mail.select("inbox")
-        total_marked = 0
-        for search in ['(UNSEEN SUBJECT "OTP")', '(UNSEEN SUBJECT "verification")',
-                       '(UNSEEN SUBJECT "code")', '(UNSEEN SUBJECT "confirm")']:
-            _, msg_ids = mail.search(None, search)
-            if msg_ids[0]:
-                for mid in msg_ids[0].split():
-                    mail.store(mid, '+FLAGS', '\\Seen')
-                total_marked += len(msg_ids[0].split())
-        if total_marked:
-            print(f"[LOGIN] Marked {total_marked} old emails as read")
-        mail.logout()
-    except Exception as e:
-        print(f"[LOGIN] Could not clear old emails: {e}")
-
-    # Step 1: Send OTP to email
+    # Step 1: Send OTP to email. We capture send_ts so the Gmail reader only
+    # accepts emails that arrived AFTER this point (avoids picking up a stale
+    # OTP from a previous run).
     print(f"[LOGIN] Sending OTP to {EMAIL[:3]}***")
+    send_ts = time.time()
     resp = session.post(
         f"{BASE_URL}/my11c/api/fl/auth/tokenize/v1/external/sendEmail",
         json={"email": EMAIL}
@@ -154,10 +158,10 @@ def scrape():
                     print(f"[LOGIN] Potential session in field '{k}': {v[:30]}...")
     print(f"[LOGIN] Session token: {'found' if session_token else 'not found'}")
 
-    # Step 2: Wait for OTP email and retrieve it
-    print("[LOGIN] Waiting for OTP email (20s for delivery)...")
-    time.sleep(20)  # Must wait for NEW email to arrive
-    otp = get_otp_from_gmail(max_wait=120)
+    # Step 2: Wait for OTP email and retrieve it. The reader filters by
+    # sender + arrival timestamp (after `send_ts`), so we don't need to
+    # pre-mark old emails or sleep up-front.
+    otp = get_otp_from_gmail(after_ts=send_ts, max_wait=180)
 
     # Step 3: Verify OTP with Cognito session
     # Verified via 400-response probing: API requires lowercase "session" + "otp" fields.
