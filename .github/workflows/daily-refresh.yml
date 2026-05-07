@@ -1,10 +1,17 @@
-name: Daily IPL Dashboard Refresh
+name: IPL Dashboard Refresh
 
 on:
   schedule:
-    # 7:30 AM CST = 13:30 UTC
-    - cron: '30 13 * * *'
+    # Every 12 hours: 01:30 UTC and 13:30 UTC (≈ 7:00 AM and 7:00 PM IST)
+    - cron: '30 1,13 * * *'
   workflow_dispatch: # allow manual trigger
+
+concurrency:
+  group: ipl-refresh
+  cancel-in-progress: false
+
+permissions:
+  contents: write
 
 jobs:
   refresh:
@@ -32,5 +39,5 @@ jobs:
           git config user.name "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
           git add index.html scripts/history.json
-          git diff --staged --quiet || git commit -m "Daily refresh: $(date -u '+%d %b %Y')"
+          git diff --staged --quiet || git commit -m "Refresh: $(date -u '+%d %b %Y %H:%M UTC')"
           git push

@@ -8,7 +8,7 @@ No browser needed.
 
 import json, re, time, os, sys
 import requests
-from datetime import datetime
+from datetime import datetime, timezone
 from pathlib import Path
 
 # ── Config ────────────────────────────────────────────────────────────
@@ -152,12 +152,15 @@ def scrape():
     # Step 3: Verify OTP with Cognito session
     print(f"[LOGIN] Verifying OTP with session...")
 
-    # The Cognito verifyEmailOtp needs: email, otp (called "answer"), Session
-    # Try different field name variations
+    # The Cognito verifyEmailOtp uses lowercase "session" (verified from prior 400 logs)
+    # and the OTP field is EMAIL_OTP_CODE (Cognito CUSTOM_CHALLENGE convention).
+    # Keep legacy variants as fallbacks in case the API surface changes.
     payloads_to_try = [
-        {"email": EMAIL, "answer": otp, "Session": session_token},
-        {"email": EMAIL, "otp": otp, "Session": session_token},
+        {"email": EMAIL, "EMAIL_OTP_CODE": otp, "session": session_token},
         {"email": EMAIL, "answer": otp, "session": session_token},
+        {"email": EMAIL, "otp": otp, "session": session_token},
+        {"email": EMAIL, "EMAIL_OTP_CODE": otp, "Session": session_token},
+        {"email": EMAIL, "answer": otp, "Session": session_token},
         {"Username": EMAIL, "ConfirmationCode": otp, "Session": session_token},
     ]
 
@@ -219,7 +222,7 @@ def scrape():
         elif not isinstance(fix_list, list):
             fix_list = []
 
-        now_ts = datetime.utcnow().timestamp()
+        now_ts = datetime.now(timezone.utc).timestamp()
 
         def _parse_ts(fx):
             mdt = fx.get("MatchdateTime", "") or fx.get("Matchdate", "")
