@@ -2,8 +2,9 @@ name: IPL Dashboard Refresh
 
 on:
   schedule:
-    # Every 12 hours: 01:30 UTC and 13:30 UTC (≈ 7:00 AM and 7:00 PM IST)
-    - cron: '30 1,13 * * *'
+    # 8:00 AM CT = 13:00 UTC, 12:30 PM CT = 17:30 UTC (CDT/UTC-5)
+    - cron: '0 13 * * *'
+    - cron: '30 17 * * *'
   workflow_dispatch: # allow manual trigger
 
 concurrency:
